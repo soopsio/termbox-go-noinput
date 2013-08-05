@@ -37,7 +37,7 @@ func Init() error {
 	}
 
 	signal.Notify(sigwinch, syscall.SIGWINCH)
-	signal.Notify(sigio, syscall.SIGIO)
+	//signal.Notify(sigio, syscall.SIGIO)
 
 	_, err = fcntl(in, syscall.F_SETFL, syscall.O_ASYNC|syscall.O_NONBLOCK)
 	if err != nil {
@@ -80,6 +80,9 @@ func Init() error {
 	back_buffer.clear()
 	front_buffer.clear()
 
+	return nil
+	panic("unreachable")
+
 	go func() {
 		buf := make([]byte, 128)
 		for {
@@ -106,7 +109,7 @@ func Init() error {
 // Finalizes termbox library, should be called after successful initialization
 // when termbox's functionality isn't required anymore.
 func Close() {
-	quit <- 1
+	//quit <- 1
 	out.WriteString(funcs[t_show_cursor])
 	out.WriteString(funcs[t_sgr0])
 	out.WriteString(funcs[t_clear_screen])
@@ -158,7 +161,7 @@ func Flush() error {
 			*front = *back
 			send_attr(back.Fg, back.Bg)
 
-			if w == 2 && x == front_buffer.width - 1 {
+			if w == 2 && x == front_buffer.width-1 {
 				// there's not enough space for 2-cells rune,
 				// let's just put a space in there
 				send_char(x, y, ' ')

@@ -1,6 +1,8 @@
 // Created by cgo -godefs - DO NOT EDIT
 // cgo -godefs syscalls.go
 
+// +build !amd64
+
 package termbox
 
 type syscall_Termios struct {
@@ -9,8 +11,8 @@ type syscall_Termios struct {
 	Cflag  uint32
 	Lflag  uint32
 	Cc     [20]uint8
-	Ispeed int32
-	Ospeed int32
+	Ispeed uint32
+	Ospeed uint32
 }
 
 const (

@@ -4,11 +4,12 @@ package termbox
 // public API, common OS agnostic part
 
 type (
-	InputMode int
-	EventType uint8
-	Modifier  uint8
-	Key       uint16
-	Attribute uint16
+	InputMode  int
+	OutputMode int
+	EventType  uint8
+	Modifier   uint8
+	Key        uint16
+	Attribute  uint16
 )
 
 // This type represents a termbox event. The 'Mod', 'Key' and 'Ch' fields are
@@ -22,6 +23,9 @@ type Event struct {
 	Width  int       // width of the screen
 	Height int       // height of the screen
 	Err    error     // error in case if input failed
+	MouseX int       // x coord of mouse
+	MouseY int       // y coord of mouse
+	N      int       // number of bytes written when getting a raw event
 }
 
 // A cell, single conceptual entity on the screen. The screen is basically a 2d
@@ -32,6 +36,11 @@ type Cell struct {
 	Fg Attribute
 	Bg Attribute
 }
+
+// To know if termbox has been initialized or not
+var (
+	IsInit bool = false
+)
 
 // Key constants, see Event.Key field.
 const (
@@ -57,7 +66,13 @@ const (
 	KeyArrowDown
 	KeyArrowLeft
 	KeyArrowRight
-	key_min
+	key_min // see terminfo
+	MouseLeft
+	MouseMiddle
+	MouseRight
+	MouseRelease
+	MouseWheelUp
+	MouseWheelDown
 )
 
 const (
@@ -111,12 +126,12 @@ const (
 
 // Alt modifier constant, see Event.Mod field and SetInputMode function.
 const (
-	ModAlt Modifier = 0x01
+	ModAlt Modifier = 1 << iota
+	ModMotion
 )
 
-// Cell attributes, it is possible to use multiple attributes by combining them
-// using bitwise OR ('|'). Although, colors cannot be combined. But you can
-// combine attributes and a single color.
+// Cell colors, you can combine a color with multiple attributes using bitwise
+// OR ('|').
 const (
 	ColorDefault Attribute = iota
 	ColorBlack
@@ -129,22 +144,44 @@ const (
 	ColorWhite
 )
 
+// Cell attributes, it is possible to use multiple attributes by combining them
+// using bitwise OR ('|'). Although, colors cannot be combined. But you can
+// combine attributes and a single color.
+//
+// It's worth mentioning that some platforms don't support certain attributes.
+// For example windows console doesn't support AttrUnderline. And on some
+// terminals applying AttrBold to background may result in blinking text. Use
+// them with caution and test your code on various terminals.
 const (
-	AttrBold Attribute = 1 << (iota + 4)
+	AttrBold Attribute = 1 << (iota + 9)
 	AttrUnderline
 	AttrReverse
 )
 
 // Input mode. See SetInputMode function.
 const (
-	InputCurrent InputMode = iota
-	InputEsc
+	InputEsc InputMode = 1 << iota
 	InputAlt
+	InputMouse
+	InputCurrent InputMode = 0
+)
+
+// Output mode. See SetOutputMode function.
+const (
+	OutputCurrent OutputMode = iota
+	OutputNormal
+	Output256
+	Output216
+	OutputGrayscale
 )
 
 // Event type. See Event.Type field.
 const (
 	EventKey EventType = iota
 	EventResize
+	EventMouse
 	EventError
+	EventInterrupt
+	EventRaw
+	EventNone
 )

@@ -1,14 +1,20 @@
 package termbox
 
+import "math"
 import "syscall"
 import "unsafe"
 import "unicode/utf16"
+import "github.com/mattn/go-runewidth"
 
 type (
-	wchar uint16
-	short int16
-	dword uint32
-	word  uint16
+	wchar     uint16
+	short     int16
+	dword     uint32
+	word      uint16
+	char_info struct {
+		char wchar
+		attr word
+	}
 	coord struct {
 		x short
 		y short
@@ -46,28 +52,60 @@ type (
 	window_buffer_size_record struct {
 		size coord
 	}
+	mouse_event_record struct {
+		mouse_pos         coord
+		button_state      dword
+		control_key_state dword
+		event_flags       dword
+	}
+	console_font_info struct {
+		font      uint32
+		font_size coord
+	}
+)
+
+const (
+	mouse_lmb = 0x1
+	mouse_rmb = 0x2
+	mouse_mmb = 0x4 | 0x8 | 0x10
+	SM_CXMIN  = 28
+	SM_CYMIN  = 29
 )
 
 func (this coord) uintptr() uintptr {
 	return uintptr(*(*int32)(unsafe.Pointer(&this)))
 }
 
+func (this *small_rect) uintptr() uintptr {
+	return uintptr(unsafe.Pointer(this))
+}
+
 var kernel32 = syscall.NewLazyDLL("kernel32.dll")
+var moduser32 = syscall.NewLazyDLL("user32.dll")
+var is_cjk = runewidth.IsEastAsian()
 
 var (
 	proc_set_console_active_screen_buffer = kernel32.NewProc("SetConsoleActiveScreenBuffer")
 	proc_set_console_screen_buffer_size   = kernel32.NewProc("SetConsoleScreenBufferSize")
+	proc_set_console_window_info          = kernel32.NewProc("SetConsoleWindowInfo")
 	proc_create_console_screen_buffer     = kernel32.NewProc("CreateConsoleScreenBuffer")
 	proc_get_console_screen_buffer_info   = kernel32.NewProc("GetConsoleScreenBufferInfo")
+	proc_write_console_output             = kernel32.NewProc("WriteConsoleOutputW")
 	proc_write_console_output_character   = kernel32.NewProc("WriteConsoleOutputCharacterW")
 	proc_write_console_output_attribute   = kernel32.NewProc("WriteConsoleOutputAttribute")
 	proc_set_console_cursor_info          = kernel32.NewProc("SetConsoleCursorInfo")
 	proc_set_console_cursor_position      = kernel32.NewProc("SetConsoleCursorPosition")
+	proc_get_console_cursor_info          = kernel32.NewProc("GetConsoleCursorInfo")
 	proc_read_console_input               = kernel32.NewProc("ReadConsoleInputW")
 	proc_get_console_mode                 = kernel32.NewProc("GetConsoleMode")
 	proc_set_console_mode                 = kernel32.NewProc("SetConsoleMode")
 	proc_fill_console_output_character    = kernel32.NewProc("FillConsoleOutputCharacterW")
 	proc_fill_console_output_attribute    = kernel32.NewProc("FillConsoleOutputAttribute")
+	proc_create_event                     = kernel32.NewProc("CreateEventW")
+	proc_wait_for_multiple_objects        = kernel32.NewProc("WaitForMultipleObjects")
+	proc_set_event                        = kernel32.NewProc("SetEvent")
+	proc_get_current_console_font         = kernel32.NewProc("GetCurrentConsoleFont")
+	get_system_metrics                    = moduser32.NewProc("GetSystemMetrics")
 )
 
 func set_console_active_screen_buffer(h syscall.Handle) (err error) {
@@ -96,6 +134,21 @@ func set_console_screen_buffer_size(h syscall.Handle, size coord) (err error) {
 	return
 }
 
+func set_console_window_info(h syscall.Handle, window *small_rect) (err error) {
+	var absolute uint32
+	absolute = 1
+	r0, _, e1 := syscall.Syscall(proc_set_console_window_info.Addr(),
+		3, uintptr(h), uintptr(absolute), window.uintptr())
+	if int(r0) == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+	return
+}
+
 func create_console_screen_buffer() (h syscall.Handle, err error) {
 	r0, _, e1 := syscall.Syscall6(proc_create_console_screen_buffer.Addr(),
 		5, uintptr(generic_read|generic_write), 0, 0, console_textmode_buffer, 0, 0)
@@ -106,12 +159,28 @@ func create_console_screen_buffer() (h syscall.Handle, err error) {
 			err = syscall.EINVAL
 		}
 	}
-	return syscall.Handle(r0), nil
+	return syscall.Handle(r0), err
 }
 
 func get_console_screen_buffer_info(h syscall.Handle, info *console_screen_buffer_info) (err error) {
 	r0, _, e1 := syscall.Syscall(proc_get_console_screen_buffer_info.Addr(),
 		2, uintptr(h), uintptr(unsafe.Pointer(info)), 0)
+	if int(r0) == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+	return
+}
+
+func write_console_output(h syscall.Handle, chars []char_info, dst small_rect) (err error) {
+	tmp_coord = coord{dst.right - dst.left + 1, dst.bottom - dst.top + 1}
+	tmp_rect = dst
+	r0, _, e1 := syscall.Syscall6(proc_write_console_output.Addr(),
+		5, uintptr(h), uintptr(unsafe.Pointer(&chars[0])), tmp_coord.uintptr(),
+		tmp_coord0.uintptr(), uintptr(unsafe.Pointer(&tmp_rect)), 0)
 	if int(r0) == 0 {
 		if e1 != 0 {
 			err = error(e1)
@@ -152,6 +221,19 @@ func write_console_output_attribute(h syscall.Handle, attrs []word, pos coord) (
 
 func set_console_cursor_info(h syscall.Handle, info *console_cursor_info) (err error) {
 	r0, _, e1 := syscall.Syscall(proc_set_console_cursor_info.Addr(),
+		2, uintptr(h), uintptr(unsafe.Pointer(info)), 0)
+	if int(r0) == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+	return
+}
+
+func get_console_cursor_info(h syscall.Handle, info *console_cursor_info) (err error) {
+	r0, _, e1 := syscall.Syscall(proc_get_console_cursor_info.Addr(),
 		2, uintptr(h), uintptr(unsafe.Pointer(info)), 0)
 	if int(r0) == 0 {
 		if e1 != 0 {
@@ -216,6 +298,7 @@ func set_console_mode(h syscall.Handle, mode dword) (err error) {
 }
 
 func fill_console_output_character(h syscall.Handle, char wchar, n int) (err error) {
+	tmp_coord = coord{0, 0}
 	r0, _, e1 := syscall.Syscall6(proc_fill_console_output_character.Addr(),
 		5, uintptr(h), uintptr(char), uintptr(n), tmp_coord.uintptr(),
 		uintptr(unsafe.Pointer(&tmp_arg)), 0)
@@ -230,6 +313,7 @@ func fill_console_output_character(h syscall.Handle, char wchar, n int) (err err
 }
 
 func fill_console_output_attribute(h syscall.Handle, attr word, n int) (err error) {
+	tmp_coord = coord{0, 0}
 	r0, _, e1 := syscall.Syscall6(proc_fill_console_output_attribute.Addr(),
 		5, uintptr(h), uintptr(attr), uintptr(n), tmp_coord.uintptr(),
 		uintptr(unsafe.Pointer(&tmp_arg)), 0)
@@ -243,10 +327,63 @@ func fill_console_output_attribute(h syscall.Handle, attr word, n int) (err erro
 	return
 }
 
+func create_event() (out syscall.Handle, err error) {
+	r0, _, e1 := syscall.Syscall6(proc_create_event.Addr(),
+		4, 0, 0, 0, 0, 0, 0)
+	if int(r0) == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+	return syscall.Handle(r0), err
+}
+
+func wait_for_multiple_objects(objects []syscall.Handle) (err error) {
+	r0, _, e1 := syscall.Syscall6(proc_wait_for_multiple_objects.Addr(),
+		4, uintptr(len(objects)), uintptr(unsafe.Pointer(&objects[0])),
+		0, 0xFFFFFFFF, 0, 0)
+	if uint32(r0) == 0xFFFFFFFF {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+	return
+}
+
+func set_event(ev syscall.Handle) (err error) {
+	r0, _, e1 := syscall.Syscall(proc_set_event.Addr(),
+		1, uintptr(ev), 0, 0)
+	if int(r0) == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+	return
+}
+
+func get_current_console_font(h syscall.Handle, info *console_font_info) (err error) {
+	r0, _, e1 := syscall.Syscall(proc_get_current_console_font.Addr(),
+		3, uintptr(h), 0, uintptr(unsafe.Pointer(info)))
+	if int(r0) == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+	return
+}
+
 type diff_msg struct {
-	pos   coord
-	attrs []word
-	chars []wchar
+	pos   short
+	lines short
+	chars []char_info
 }
 
 type input_event struct {
@@ -255,66 +392,126 @@ type input_event struct {
 }
 
 var (
-	orig_mode    dword
-	orig_screen  syscall.Handle
-	back_buffer  cellbuf
-	front_buffer cellbuf
-	termw        int
-	termh        int
-	input_mode   = InputEsc
-	cursor_x     = cursor_hidden
-	cursor_y     = cursor_hidden
-	foreground   = ColorDefault
-	background   = ColorDefault
-	in           syscall.Handle
-	out          syscall.Handle
-	attrsbuf     []word
-	charsbuf     []wchar
-	diffbuf      []diff_msg
-	beg_x        = -1
-	beg_y        = -1
-	beg_i        = -1
-	input_comm   = make(chan Event)
-	alt_mode_esc = false
+	orig_cursor_info console_cursor_info
+	orig_size        coord
+	orig_window      small_rect
+	orig_mode        dword
+	orig_screen      syscall.Handle
+	back_buffer      cellbuf
+	front_buffer     cellbuf
+	term_size        coord
+	input_mode       = InputEsc
+	cursor_x         = cursor_hidden
+	cursor_y         = cursor_hidden
+	foreground       = ColorDefault
+	background       = ColorDefault
+	in               syscall.Handle
+	out              syscall.Handle
+	interrupt        syscall.Handle
+	charbuf          []char_info
+	diffbuf          []diff_msg
+	beg_x            = -1
+	beg_y            = -1
+	beg_i            = -1
+	input_comm       = make(chan Event)
+	interrupt_comm   = make(chan struct{})
+	cancel_comm      = make(chan bool, 1)
+	cancel_done_comm = make(chan bool)
+	alt_mode_esc     = false
 
 	// these ones just to prevent heap allocs at all costs
-	tmp_info  console_screen_buffer_info
-	tmp_arg   dword
-	tmp_coord = coord{0, 0}
+	tmp_info   console_screen_buffer_info
+	tmp_arg    dword
+	tmp_coord0 = coord{0, 0}
+	tmp_coord  = coord{0, 0}
+	tmp_rect   = small_rect{0, 0, 0, 0}
+	tmp_finfo  console_font_info
 )
 
-func get_term_size(out syscall.Handle) (int, int) {
+func get_cursor_position(out syscall.Handle) coord {
 	err := get_console_screen_buffer_info(out, &tmp_info)
 	if err != nil {
 		panic(err)
 	}
-	return int(tmp_info.size.x), int(tmp_info.size.y)
+	return tmp_info.cursor_position
 }
 
-func get_win_size(out syscall.Handle) (int, int) {
+func get_term_size(out syscall.Handle) (coord, small_rect) {
 	err := get_console_screen_buffer_info(out, &tmp_info)
 	if err != nil {
 		panic(err)
 	}
-	return int(tmp_info.window.right-tmp_info.window.left) + 1,
-		int(tmp_info.window.bottom-tmp_info.window.top) + 1
+	return tmp_info.size, tmp_info.window
+}
+
+func get_win_min_size(out syscall.Handle) coord {
+	x, _, err := get_system_metrics.Call(SM_CXMIN)
+	y, _, err := get_system_metrics.Call(SM_CYMIN)
+
+	if x == 0 || y == 0 {
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	err1 := get_current_console_font(out, &tmp_finfo)
+	if err1 != nil {
+		panic(err1)
+	}
+
+	return coord{
+		x: short(math.Ceil(float64(x) / float64(tmp_finfo.font_size.x))),
+		y: short(math.Ceil(float64(y) / float64(tmp_finfo.font_size.y))),
+	}
+}
+
+func get_win_size(out syscall.Handle) coord {
+	err := get_console_screen_buffer_info(out, &tmp_info)
+	if err != nil {
+		panic(err)
+	}
+
+	min_size := get_win_min_size(out)
+
+	size := coord{
+		x: tmp_info.window.right - tmp_info.window.left + 1,
+		y: tmp_info.window.bottom - tmp_info.window.top + 1,
+	}
+
+	if size.x < min_size.x {
+		size.x = min_size.x
+	}
+
+	if size.y < min_size.y {
+		size.y = min_size.y
+	}
+
+	return size
+}
+
+func fix_win_size(out syscall.Handle, size coord) (err error) {
+	window := small_rect{}
+	window.top = 0
+	window.bottom = size.y - 1
+	window.left = 0
+	window.right = size.x - 1
+	return set_console_window_info(out, &window)
 }
 
 func update_size_maybe() {
-	w, h := get_term_size(out)
-	if w != termw || h != termh {
-		termw, termh = w, h
-		back_buffer.resize(termw, termh)
-		front_buffer.resize(termw, termh)
+	size := get_win_size(out)
+	if size.x != term_size.x || size.y != term_size.y {
+		set_console_screen_buffer_size(out, size)
+		fix_win_size(out, size)
+		term_size = size
+		back_buffer.resize(int(size.x), int(size.y))
+		front_buffer.resize(int(size.x), int(size.y))
 		front_buffer.clear()
 		clear()
 
-		size := termw * termh
-		if cap(attrsbuf) < size {
-			attrsbuf = make([]word, 0, size)
-		}
-		if cap(charsbuf) < size {
-			charsbuf = make([]wchar, 0, size)
+		area := int(size.x) * int(size.y)
+		if cap(charbuf) < area {
+			charbuf = make([]char_info, 0, area)
 		}
 	}
 }
@@ -326,8 +523,8 @@ var color_table_bg = []word{
 	background_green,
 	background_red | background_green, // yellow
 	background_blue,
-	background_red | background_blue,                    // magenta
-	background_green | background_blue,                  // cyan
+	background_red | background_blue,   // magenta
+	background_green | background_blue, // cyan
 	background_red | background_blue | background_green, // white
 }
 
@@ -338,8 +535,8 @@ var color_table_fg = []word{
 	foreground_green,
 	foreground_red | foreground_green, // yellow
 	foreground_blue,
-	foreground_red | foreground_blue,                    // magenta
-	foreground_green | foreground_blue,                  // cyan
+	foreground_red | foreground_blue,   // magenta
+	foreground_green | foreground_blue, // cyan
 	foreground_red | foreground_blue | foreground_green, // white
 }
 
@@ -352,93 +549,81 @@ const (
 	surr_self        = 0x10000
 )
 
+func append_diff_line(y int) int {
+	n := 0
+	for x := 0; x < front_buffer.width; {
+		cell_offset := y*front_buffer.width + x
+		back := &back_buffer.cells[cell_offset]
+		front := &front_buffer.cells[cell_offset]
+		attr, char := cell_to_char_info(*back)
+		charbuf = append(charbuf, char_info{attr: attr, char: char[0]})
+		*front = *back
+		n++
+		w := runewidth.RuneWidth(back.Ch)
+		if w == 0 || w == 2 && runewidth.IsAmbiguousWidth(back.Ch) {
+			w = 1
+		}
+		x += w
+		// If not CJK, fill trailing space with whitespace
+		if !is_cjk && w == 2 {
+			charbuf = append(charbuf, char_info{attr: attr, char: ' '})
+		}
+	}
+	return n
+}
+
 // compares 'back_buffer' with 'front_buffer' and prepares all changes in the form of
 // 'diff_msg's in the 'diff_buf'
 func prepare_diff_messages() {
 	// clear buffers
-	attrsbuf = attrsbuf[:0]
-	charsbuf = charsbuf[:0]
 	diffbuf = diffbuf[:0]
-	beg_x = -1
+	charbuf = charbuf[:0]
 
+	var diff diff_msg
+	gbeg := 0
 	for y := 0; y < front_buffer.height; y++ {
+		same := true
 		line_offset := y * front_buffer.width
-		for x := 0; x < front_buffer.width; {
+		for x := 0; x < front_buffer.width; x++ {
 			cell_offset := line_offset + x
 			back := &back_buffer.cells[cell_offset]
 			front := &front_buffer.cells[cell_offset]
-			w := rune_width(back.Ch)
-			if *back == *front {
-				if beg_x != -1 {
-					// there is a sequence in progress,
-					// commit it
-					diffbuf = append(diffbuf, diff_msg{
-						coord{short(beg_x), short(beg_y)},
-						attrsbuf[beg_i:],
-						charsbuf[beg_i:],
-					})
-					beg_x = -1
-				}
-				x += w
-				continue
+			if *back != *front {
+				same = false
+				break
 			}
-
-			*front = *back
-
-			// have diff
-			if beg_x == -1 {
-				// no started sequence, start one
-				beg_x, beg_y = x, y
-				beg_i = len(charsbuf)
+		}
+		if same && diff.lines > 0 {
+			diffbuf = append(diffbuf, diff)
+			diff = diff_msg{}
+		}
+		if !same {
+			beg := len(charbuf)
+			end := beg + append_diff_line(y)
+			if diff.lines == 0 {
+				diff.pos = short(y)
+				gbeg = beg
 			}
-			attr, char := cell_to_char_info(*back)
-			if w == 2 && x == front_buffer.width - 1 {
-				// not enough space for a 2-cells rune,
-				// let's just put a space in there
-				front.Ch = ' '
-				char[0] = ' '
-				w = 1
-			}
-
-			attrsbuf = append(attrsbuf, attr)
-			charsbuf = append(charsbuf, char[0])
-			if w == 2 {
-				// we assume here that only 2-cell
-				// runes can use more than one utf16
-				// characters, it's not true, but in
-				// most cases it is
-				attrsbuf = append(attrsbuf, attr)
-				charsbuf = append(charsbuf, char[1])
-
-				// for wide runes we also trash the next cell,
-				// so that it gets updated correctly later, we
-				// never get there if the wide rune happened to
-				// be in the last cell of the line, no need to
-				// check for bounds
-				next := cell_offset + 1
-				front_buffer.cells[next] = Cell{
-					Ch: 0,
-					Fg: back.Fg,
-					Bg: back.Bg,
-				}
-			}
-			x += w
+			diff.lines++
+			diff.chars = charbuf[gbeg:end]
 		}
 	}
-
-	if beg_x != -1 {
-		// there is a sequence in progress,
-		// commit it
-		diffbuf = append(diffbuf, diff_msg{
-			coord{short(beg_x), short(beg_y)},
-			attrsbuf[beg_i:],
-			charsbuf[beg_i:],
-		})
+	if diff.lines > 0 {
+		diffbuf = append(diffbuf, diff)
+		diff = diff_msg{}
 	}
 }
 
+func get_ct(table []word, idx int) word {
+	idx = idx & 0x0F
+	if idx >= len(table) {
+		idx = len(table) - 1
+	}
+	return table[idx]
+}
+
 func cell_to_char_info(c Cell) (attr word, wc [2]wchar) {
-	attr = color_table_fg[c.Fg&0x0F] | color_table_bg[c.Bg&0x0F]
+	attr = get_ct(color_table_fg, int(c.Fg)) | get_ct(color_table_bg, int(c.Bg))
 	if c.Fg&AttrReverse|c.Bg&AttrReverse != 0 {
 		attr = (attr&0xF0)>>4 | (attr&0x0F)<<4
 	}
@@ -490,11 +675,12 @@ func clear() {
 		background,
 	})
 
-	err = fill_console_output_attribute(out, attr, termw*termh)
+	area := int(term_size.x) * int(term_size.y)
+	err = fill_console_output_attribute(out, attr, area)
 	if err != nil {
 		panic(err)
 	}
-	err = fill_console_output_character(out, char[0], termw*termh)
+	err = fill_console_output_character(out, char[0], area)
 	if err != nil {
 		panic(err)
 	}
@@ -509,7 +695,7 @@ func key_event_record_to_event(r *key_event_record) (Event, bool) {
 	}
 
 	e := Event{Type: EventKey}
-	if input_mode == InputAlt {
+	if input_mode&InputAlt != 0 {
 		if alt_mode_esc {
 			e.Mod = ModAlt
 			alt_mode_esc = false
@@ -587,10 +773,10 @@ func key_event_record_to_event(r *key_event_record) (Event, bool) {
 		case vk_enter:
 			e.Key = KeyEnter
 		case vk_esc:
-			switch input_mode {
-			case InputEsc:
+			switch {
+			case input_mode&InputEsc != 0:
 				e.Key = KeyEsc
-			case InputAlt:
+			case input_mode&InputAlt != 0:
 				alt_mode_esc = true
 				return Event{}, false
 			}
@@ -612,7 +798,7 @@ func key_event_record_to_event(r *key_event_record) (Event, bool) {
 	if ctrlpressed {
 		if Key(r.unicode_char) >= KeyCtrlA && Key(r.unicode_char) <= KeyCtrlRsqBracket {
 			e.Key = Key(r.unicode_char)
-			if input_mode == InputAlt && e.Key == KeyEsc {
+			if input_mode&InputAlt != 0 && e.Key == KeyEsc {
 				alt_mode_esc = true
 				return Event{}, false
 			}
@@ -624,7 +810,7 @@ func key_event_record_to_event(r *key_event_record) (Event, bool) {
 			e.Key = KeyCtrl2
 			return e, true
 		case 51:
-			if input_mode == InputAlt {
+			if input_mode&InputAlt != 0 {
 				alt_mode_esc = true
 				return Event{}, false
 			}
@@ -657,7 +843,24 @@ func key_event_record_to_event(r *key_event_record) (Event, bool) {
 func input_event_producer() {
 	var r input_record
 	var err error
+	var last_button Key
+	var last_button_pressed Key
+	var last_state = dword(0)
+	var last_x, last_y = -1, -1
+	handles := []syscall.Handle{in, interrupt}
 	for {
+		err = wait_for_multiple_objects(handles)
+		if err != nil {
+			input_comm <- Event{Type: EventError, Err: err}
+		}
+
+		select {
+		case <-cancel_comm:
+			cancel_done_comm <- true
+			return
+		default:
+		}
+
 		err = read_console_input(in, &r)
 		if err != nil {
 			input_comm <- Event{Type: EventError, Err: err}
@@ -678,6 +881,67 @@ func input_event_producer() {
 				Type:   EventResize,
 				Width:  int(sr.size.x),
 				Height: int(sr.size.y),
+			}
+		case mouse_event:
+			mr := *(*mouse_event_record)(unsafe.Pointer(&r.event))
+			ev := Event{Type: EventMouse}
+			switch mr.event_flags {
+			case 0, 2:
+				// single or double click
+				cur_state := mr.button_state
+				switch {
+				case last_state&mouse_lmb == 0 && cur_state&mouse_lmb != 0:
+					last_button = MouseLeft
+					last_button_pressed = last_button
+				case last_state&mouse_rmb == 0 && cur_state&mouse_rmb != 0:
+					last_button = MouseRight
+					last_button_pressed = last_button
+				case last_state&mouse_mmb == 0 && cur_state&mouse_mmb != 0:
+					last_button = MouseMiddle
+					last_button_pressed = last_button
+				case last_state&mouse_lmb != 0 && cur_state&mouse_lmb == 0:
+					last_button = MouseRelease
+				case last_state&mouse_rmb != 0 && cur_state&mouse_rmb == 0:
+					last_button = MouseRelease
+				case last_state&mouse_mmb != 0 && cur_state&mouse_mmb == 0:
+					last_button = MouseRelease
+				default:
+					last_state = cur_state
+					continue
+				}
+				last_state = cur_state
+				ev.Key = last_button
+				last_x, last_y = int(mr.mouse_pos.x), int(mr.mouse_pos.y)
+				ev.MouseX = last_x
+				ev.MouseY = last_y
+			case 1:
+				// mouse motion
+				x, y := int(mr.mouse_pos.x), int(mr.mouse_pos.y)
+				if last_state != 0 && (last_x != x || last_y != y) {
+					ev.Key = last_button_pressed
+					ev.Mod = ModMotion
+					ev.MouseX = x
+					ev.MouseY = y
+					last_x, last_y = x, y
+				} else {
+					ev.Type = EventNone
+				}
+			case 4:
+				// mouse wheel
+				n := int16(mr.button_state >> 16)
+				if n > 0 {
+					ev.Key = MouseWheelUp
+				} else {
+					ev.Key = MouseWheelDown
+				}
+				last_x, last_y = int(mr.mouse_pos.x), int(mr.mouse_pos.y)
+				ev.MouseX = last_x
+				ev.MouseY = last_y
+			default:
+				ev.Type = EventNone
+			}
+			if ev.Type != EventNone {
+				input_comm <- ev
 			}
 		}
 	}

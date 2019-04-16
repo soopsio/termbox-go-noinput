@@ -1,6 +1,8 @@
 package termbox
 
-import "syscall"
+import (
+	"syscall"
+)
 
 // public API
 
@@ -16,11 +18,16 @@ import "syscall"
 func Init() error {
 	var err error
 
-	in, err = syscall.GetStdHandle(syscall.STD_INPUT_HANDLE)
+	interrupt, err = create_event()
 	if err != nil {
 		return err
 	}
-	out, err = syscall.GetStdHandle(syscall.STD_OUTPUT_HANDLE)
+
+	in, err = syscall.Open("CONIN$", syscall.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	out, err = syscall.Open("CONOUT$", syscall.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
@@ -35,37 +42,36 @@ func Init() error {
 		return err
 	}
 
-	w, h := get_win_size(out)
-	orig_screen = out
-	out, err = create_console_screen_buffer()
+	orig_size, orig_window = get_term_size(out)
+	win_size := get_win_size(out)
+
+	err = set_console_screen_buffer_size(out, win_size)
 	if err != nil {
 		return err
 	}
 
-	err = set_console_screen_buffer_size(out, coord{short(w), short(h)})
+	err = fix_win_size(out, win_size)
 	if err != nil {
 		return err
 	}
 
-	err = set_console_active_screen_buffer(out)
+	err = get_console_cursor_info(out, &orig_cursor_info)
 	if err != nil {
 		return err
 	}
 
 	show_cursor(false)
-	termw, termh = get_term_size(out)
-	back_buffer.init(termw, termh)
-	front_buffer.init(termw, termh)
+	term_size, _ = get_term_size(out)
+	back_buffer.init(int(term_size.x), int(term_size.y))
+	front_buffer.init(int(term_size.x), int(term_size.y))
 	back_buffer.clear()
 	front_buffer.clear()
 	clear()
 
-	attrsbuf = make([]word, 0, termw*termh)
-	charsbuf = make([]wchar, 0, termw*termh)
 	diffbuf = make([]diff_msg, 0, 32)
 
 	go input_event_producer()
-
+	IsInit = true
 	return nil
 }
 
@@ -73,17 +79,48 @@ func Init() error {
 // when termbox's functionality isn't required anymore.
 func Close() {
 	// we ignore errors here, because we can't really do anything about them
+	Clear(0, 0)
+	Flush()
+
+	// stop event producer
+	cancel_comm <- true
+	set_event(interrupt)
+	select {
+	case <-input_comm:
+	default:
+	}
+	<-cancel_done_comm
+
+	set_console_screen_buffer_size(out, orig_size)
+	set_console_window_info(out, &orig_window)
+	set_console_cursor_info(out, &orig_cursor_info)
+	set_console_cursor_position(out, coord{})
 	set_console_mode(in, orig_mode)
-	set_console_active_screen_buffer(orig_screen)
+	syscall.Close(in)
+	syscall.Close(out)
+	syscall.Close(interrupt)
+	IsInit = false
+}
+
+// Interrupt an in-progress call to PollEvent by causing it to return
+// EventInterrupt.  Note that this function will block until the PollEvent
+// function has successfully been interrupted.
+func Interrupt() {
+	interrupt_comm <- struct{}{}
 }
 
 // Synchronizes the internal back buffer with the terminal.
 func Flush() error {
 	update_size_maybe()
 	prepare_diff_messages()
-	for _, msg := range diffbuf {
-		write_console_output_attribute(out, msg.attrs, msg.pos)
-		write_console_output_character(out, msg.chars, msg.pos)
+	for _, diff := range diffbuf {
+		r := small_rect{
+			left:   0,
+			top:    diff.pos,
+			right:  term_size.x - 1,
+			bottom: diff.pos + diff.lines - 1,
+		}
+		write_console_output(out, diff.chars, r)
 	}
 	if !is_cursor_hidden(cursor_x, cursor_y) {
 		move_cursor(cursor_x, cursor_y)
@@ -134,13 +171,20 @@ func CellBuffer() []Cell {
 
 // Wait for an event and return it. This is a blocking function call.
 func PollEvent() Event {
-	return <-input_comm
+	select {
+	case ev := <-input_comm:
+		return ev
+	case <-interrupt_comm:
+		return Event{Type: EventInterrupt}
+	}
 }
 
-// Returns the size of the internal back buffer (which is the same as
-// terminal's window size in characters).
+// Returns the size of the internal back buffer (which is mostly the same as
+// console's window size in characters). But it doesn't always match the size
+// of the console window, after the console size has changed, the internal back
+// buffer will get in sync only after Clear or Flush function calls.
 func Size() (int, int) {
-	return termw, termh
+	return int(term_size.x), int(term_size.y)
 }
 
 // Clears the internal back buffer.
@@ -154,16 +198,48 @@ func Clear(fg, bg Attribute) error {
 // Sets termbox input mode. Termbox has two input modes:
 //
 // 1. Esc input mode. When ESC sequence is in the buffer and it doesn't match
-// any known sequence. ESC means KeyEsc.
+// any known sequence. ESC means KeyEsc. This is the default input mode.
 //
 // 2. Alt input mode. When ESC sequence is in the buffer and it doesn't match
 // any known sequence. ESC enables ModAlt modifier for the next keyboard event.
 //
+// Both input modes can be OR'ed with Mouse mode. Setting Mouse mode bit up will
+// enable mouse button press/release and drag events.
+//
 // If 'mode' is InputCurrent, returns the current input mode. See also Input*
 // constants.
 func SetInputMode(mode InputMode) InputMode {
-	if mode != InputCurrent {
-		input_mode = mode
+	if mode == InputCurrent {
+		return input_mode
 	}
+	if mode&InputMouse != 0 {
+		err := set_console_mode(in, enable_window_input|enable_mouse_input|enable_extended_flags)
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		err := set_console_mode(in, enable_window_input)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	input_mode = mode
 	return input_mode
+}
+
+// Sets the termbox output mode.
+//
+// Windows console does not support extra colour modes,
+// so this will always set and return OutputNormal.
+func SetOutputMode(mode OutputMode) OutputMode {
+	return OutputNormal
+}
+
+// Sync comes handy when something causes desync between termbox's understanding
+// of a terminal buffer and the reality. Such as a third party process. Sync
+// forces a complete resync between the termbox and a terminal, it may not be
+// visually pretty though. At the moment on Windows it does nothing.
+func Sync() error {
+	return nil
 }
